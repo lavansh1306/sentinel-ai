@@ -32,6 +32,7 @@ def wait_for_db(tries: int = 30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--reset", action="store_true")
+    ap.add_argument("--skip-index", action="store_true", help="defer runbook indexing until the API starts")
     args = ap.parse_args()
 
     wait_for_db()
@@ -56,9 +57,12 @@ def main():
                     initial_env=d["env_state"], ground_truth=d["ground_truth"], baseline_mttr_min=d["baseline_mttr_min"]))
             audit.record(db, "system", "system.seeded", payload={"incidents": len(data)})
             print(f"loaded {len(data)} incidents")
-        idx = rag.build_index()
-        print(f"indexed {idx['indexed']} approved runbooks; skipped unapproved: {idx['skipped_unapproved']}")
-        print(f"chroma store: {settings.chroma_dir}")
+        if args.skip_index:
+            print("runbook indexing deferred until API startup")
+        else:
+            idx = rag.build_index()
+            print(f"indexed {idx['indexed']} approved runbooks; skipped unapproved: {idx['skipped_unapproved']}")
+            print(f"chroma store: {settings.chroma_dir}")
     finally:
         db.close()
 

@@ -71,7 +71,7 @@ docker compose up --build
 - Open **http://localhost:3000**
 - Open **http://localhost:8080** to browse the MySQL database visually in Adminer
 - Sign in as any demo user, password **`sentinel`**
-- First start downloads the small embedding model (~80 MB) once
+- First start downloads the small embedding model (~80 MB) in the background; the API starts immediately, and interrupted downloads resume automatically
 - API docs: **http://localhost:8000/docs**
 
 > **Linux only:** Ollama listens on 127.0.0.1 by default, so containers can't reach it.
@@ -227,4 +227,3 @@ frontend/
 - The rule engine and the incident generator were written together, so rule-signal accuracy is optimistic;
   the ablation table shows how much each part contributes on its own.
 - Demo login uses one shared password; replace `auth.py` with SSO before any real use.
-# sentinel-ai

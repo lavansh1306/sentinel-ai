@@ -3,20 +3,24 @@
 Runbooks are markdown files with YAML front matter. A runbook with
 `approved: false` is never indexed, and approval is re-checked at query time.
 """
+import hashlib
 import re
 import threading
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 import chromadb
+import httpx
 import yaml
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction, ONNXMiniLM_L6_V2
 
 from .config import settings
 
 FRONT = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.S)
 _lock = threading.Lock()
+_client_lock = threading.Lock()
 _client = None
 
 
@@ -71,16 +75,69 @@ def runbook_for(root_cause: str) -> Runbook | None:
     return catalog()["by_cause"].get(root_cause)
 
 
+class _NetworkTolerantMiniLM(ONNXMiniLM_L6_V2):
+    def _download(self, url: str, fname: str, chunk_size: int = 1024) -> None:
+        timeout = httpx.Timeout(120.0, connect=10.0)
+        for attempt in range(3):
+            path = Path(fname)
+            offset = path.stat().st_size if path.exists() else 0
+            headers = {"Range": f"bytes={offset}-"} if offset else {}
+            try:
+                with httpx.stream("GET", url, headers=headers, timeout=timeout) as resp:
+                    resp.raise_for_status()
+                    if offset and resp.status_code == 206:
+                        content_range = re.fullmatch(
+                            r"bytes (\d+)-\d+/(\d+)", resp.headers.get("content-range", "")
+                        )
+                        if not content_range or int(content_range.group(1)) != offset:
+                            raise ValueError("Model download returned an invalid byte range")
+                        total = int(content_range.group(2))
+                        mode = "ab"
+                    else:
+                        if resp.status_code == 206:
+                            raise ValueError("Model download unexpectedly returned a partial response")
+                        offset = 0
+                        total = int(resp.headers.get("content-length", 0))
+                        mode = "wb"
+                    with open(fname, mode) as file, self.tqdm(
+                        desc=str(fname), total=total, initial=offset, unit="iB", unit_scale=True, unit_divisor=1024
+                    ) as bar:
+                        for data in resp.iter_bytes(chunk_size=chunk_size):
+                            size = file.write(data)
+                            bar.update(size)
+                if not _verify_model_archive(fname, self._MODEL_SHA256):
+                    Path(fname).unlink(missing_ok=True)
+                    raise ValueError(f"Downloaded model archive {fname} failed SHA256 verification")
+                return
+            except httpx.RequestError:
+                if attempt == 2:
+                    raise
+                time.sleep(attempt + 1)
+
+
+def _verify_model_archive(path: str, expected_sha256: str) -> bool:
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(4096), b""):
+            digest.update(chunk)
+    return digest.hexdigest() == expected_sha256
+
+
 def _embedder():
     return DefaultEmbeddingFunction()   # all-MiniLM-L6-v2 (ONNX), downloaded once, runs locally
 
 
+def _ensure_model_downloaded() -> None:
+    _NetworkTolerantMiniLM()._download_model_if_not_exists()
+
+
 def _collection():
     global _client
-    if _client is None:
-        _client = chromadb.PersistentClient(path=settings.chroma_dir)
-    return _client.get_or_create_collection(
-        "approved_runbooks", embedding_function=_embedder(), configuration={"hnsw": {"space": "cosine"}})
+    with _client_lock:
+        if _client is None:
+            _client = chromadb.PersistentClient(path=settings.chroma_dir)
+        return _client.get_or_create_collection(
+            "approved_runbooks", embedding_function=_embedder(), configuration={"hnsw": {"space": "cosine"}})
 
 
 def _doc_text(rb: Runbook) -> str:
@@ -93,6 +150,8 @@ def build_index() -> dict:
         cat = catalog()
         col = _collection()
         approved = list(cat["by_id"].values())
+        if approved:
+            _ensure_model_downloaded()
         existing = set(col.get()["ids"])
         stale = existing - {b.id for b in approved}
         if stale:
@@ -113,6 +172,8 @@ def retrieve(query: str, k: int | None = None) -> list[dict]:
     col = _collection()
     if col.count() == 0:
         build_index()
+    else:
+        _ensure_model_downloaded()
     k = k or settings.retrieval_k
     res = col.query(query_texts=[query], n_results=k)
     approved = catalog()["by_id"]

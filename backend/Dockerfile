@@ -9,5 +9,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 EXPOSE 8000
 
-# create tables + load incidents + index runbooks (idempotent), then serve
-CMD ["sh", "-c", "python -m scripts.seed && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# create tables + load incidents, then serve while runbook indexing runs in the background
+CMD ["sh", "-c", "python -m scripts.seed --skip-index && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

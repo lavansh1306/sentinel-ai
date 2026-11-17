@@ -1,5 +1,6 @@
 """Sentinel API — FastAPI."""
 import json
+import logging
 import statistics
 import threading
 
@@ -18,8 +19,23 @@ from .db import SessionLocal, get_db, iso, utcnow
 from .models import Action, AuditEvent, EvalRun, Incident, TriageRun
 
 app = FastAPI(title="Sentinel — Responsible Incident Triage Agent", version="1.0.0")
+logger = logging.getLogger(__name__)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
+
+
+def _index_runbooks():
+    try:
+        result = rag.build_index()
+        logger.info("Indexed %s approved runbooks; skipped unapproved: %s",
+                    result["indexed"], result["skipped_unapproved"])
+    except Exception:
+        logger.exception("Background runbook indexing failed")
+
+
+@app.on_event("startup")
+def start_runbook_indexing():
+    threading.Thread(target=_index_runbooks, name="runbook-index", daemon=True).start()
 
 
 @app.exception_handler(workflow.WorkflowError)
